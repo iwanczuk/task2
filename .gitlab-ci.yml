@@ -1,0 +1,118 @@
+default:
+  image: registry.gitlab.com/gitlab-org/terraform-images/releases/terraform:1.5.5
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/
+      variables:
+        ENVIRONMENT: production
+        DOMAIN: example.com
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      variables:
+        ENVIRONMENT: stage
+        DOMAIN: example.dev
+    - if: $CI_MERGE_REQUEST_ID
+      variables:
+        ENVIRONMENT: review/$CI_MERGE_REQUEST_ID
+        DOMAIN: example.dev
+
+variables:
+  TF_ROOT: ${CI_PROJECT_DIR}/terraform
+  TF_STATE_NAME: ${ENVIRONMENT}
+  TF_CLI_ARGS_plan: -var-file=${ENVIRONMENT}.tfvars
+
+cache:
+  key: ${TF_STATE_NAME}
+  paths:
+    - ${TF_ROOT}/.terraform
+
+before_script:
+  - cd ${TF_ROOT}
+
+stages:
+  - prepare
+  - validate
+  - plan
+  - deploy
+
+init:
+  stage: prepare
+  script:
+    - gitlab-terraform init
+
+validate:
+  stage: validate
+  script:
+    - gitlab-terraform validate
+
+plan:
+  stage: plan
+  environment:
+    action: prepare
+    name: $ENVIRONMENT
+  script:
+    - gitlab-terraform plan
+    - gitlab-terraform plan-json
+  rules:
+    - if: $ENVIRONMENT =~ /^review\//
+    - if: $ENVIRONMENT == "stage"
+    - if: $ENVIRONMENT == "production"
+  artifacts:
+    name: plan
+    paths:
+      - ${TF_ROOT}/plan.cache
+    reports:
+      terraform: ${TF_ROOT}/plan.json
+
+apply_review:
+  stage: deploy
+  environment:
+    action: start
+    on_stop: destroy_review
+    auto_stop_in: 1 week
+    name: $ENVIRONMENT
+    url: https://$CI_ENVIRONMENT_SLUG.$DOMAIN
+  script:
+    - gitlab-terraform apply
+  dependencies:
+    - plan
+  rules:
+    - if: $ENVIRONMENT =~ /^review\//
+
+apply_stage:
+  stage: deploy
+  environment:
+    action: start
+    name: $ENVIRONMENT
+    url: https://$CI_ENVIRONMENT_SLUG.$DOMAIN
+  script:
+    - gitlab-terraform apply
+  dependencies:
+    - plan
+  rules:
+    - if: $ENVIRONMENT == "stage"
+
+apply_production:
+  stage: deploy
+  environment:
+    action: start
+    name: $ENVIRONMENT
+    url: https://$DOMAIN
+  script:
+    - gitlab-terraform apply
+  dependencies:
+    - plan
+  rules:
+    - if: $ENVIRONMENT == "production"
+      when: manual
+
+destroy_review:
+  stage: deploy
+  script:
+    - gitlab-terraform destroy
+  environment:
+    name: $ENVIRONMENT
+    action: stop
+  rules:
+    - if: $ENVIRONMENT =~ /^review\//
+      when: manual
